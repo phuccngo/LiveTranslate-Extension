@@ -1,13 +1,31 @@
 {
   "manifest_version": 3,
-  "name": "My First Extension",
-  "version": "1.0.0",
-  "description": "My first chrome extension",
+  "name": "AI Realtime Translator",
+  "version": "0.3.0",
+  "description": "Realtime AI translation & dubbing overlay for videos",
+
+  "icons": {
+    "16":  "assets/16_icon.png",
+    "32":  "assets/32_icon.png",
+    "48":  "assets/48_icon.png",
+    "128": "assets/128_icon.png"
+  },
 
   "permissions": [
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "tabCapture",
+    "offscreen",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "https://*.youtube.com/*",
+    "https://*.netflix.com/*",
+    "https://*.twitch.tv/*",
+    "https://*.udemy.com/*",
+    "https://*.coursera.org/*"
   ],
 
   "background": {
@@ -15,6 +33,26 @@
   },
 
   "action": {
-    "default_popup": "popup.html"
-  }
+    "default_popup":  "popup.html",
+    "default_title":  "AI Realtime Translator",
+    "default_icon": {
+      "16": "assets/16_icon.png",
+      "32": "assets/32_icon.png"
+    }
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.youtube.com/*",
+        "https://*.netflix.com/*",
+        "https://*.twitch.tv/*",
+        "https://*.udemy.com/*",
+        "https://*.coursera.org/*"
+      ],
+      "js":         ["content.js"],
+      "run_at":     "document_idle",
+      "all_frames": false
+    }
+  ]
 }

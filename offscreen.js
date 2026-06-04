@@ -74,8 +74,13 @@ async function startCapture(streamId) {
     const source  = audioContext.createMediaStreamSource(audioStream);
     analyserNode  = audioContext.createAnalyser();
     analyserNode.fftSize = 256;
+
+    // Graph: source → analyser → destination (speaker)
+    // Phải connect tới destination để user nghe được audio gốc.
+    // tabCapture mute tab audio — nếu không route lại qua AudioContext
+    // thì user sẽ mất tiếng hoàn toàn khi extension đang chạy.
     source.connect(analyserNode);
-    // KHÔNG connect analyser → destination để tránh echo tab audio
+    analyserNode.connect(audioContext.destination);
 
     // ── Khởi tạo MediaRecorder ───────────────────────────────────────────
     const mimeType = pickMimeType();
@@ -138,7 +143,10 @@ async function startCapture(streamId) {
   }
 }
 
-// ── Khởi tạo recorder trực tiếp từ MediaStream (khi offscreen gọi chrome.tabCapture) ─────────
+// ── Khởi tạo recorder trực tiếp từ MediaStream (reserved for future use) ──────
+// Hiện tại không được gọi. Khi Phase 5 cần inject TTS hoặc mix audio,
+// background có thể truyền trực tiếp stream object qua chrome.tabCapture
+// với cách khác (e.g. chrome.tabCapture.getMediaStreamId).
 function startRecorderWithStream(stream) {
   try {
     audioStream = stream;
@@ -148,6 +156,7 @@ function startRecorderWithStream(stream) {
     analyserNode  = audioContext.createAnalyser();
     analyserNode.fftSize = 256;
     source.connect(analyserNode);
+    analyserNode.connect(audioContext.destination);
 
     const mimeType = pickMimeType();
     console.log("[Offscreen] Using MIME type:", mimeType || "(browser default)");
@@ -229,28 +238,10 @@ function stopCapture() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message.type) {
 
-    case "START_TAB_CAPTURE": {
-      // Must call chrome.tabCapture.capture() synchronously inside this message handler
-      try {
-        chrome.tabCapture.capture({ audio: true, video: false }, (stream) => {
-          if (chrome.runtime.lastError || !stream) {
-            const msg = chrome.runtime.lastError?.message ?? "No stream returned";
-            console.error("[Offscreen] tabCapture.capture() failed:", msg);
-            toBackground({ type: "CAPTURE_ERROR", payload: { message: msg } });
-            return;
-          }
-
-          // Start recorder directly from obtained MediaStream
-          startRecorderWithStream(stream);
-        });
-      } catch (err) {
-        console.error("[Offscreen] START_TAB_CAPTURE failed:", err);
-        toBackground({ type: "CAPTURE_ERROR", payload: { message: err.message } });
-      }
-
-      sendResponse({ ok: true });
-      break;
-    }
+    // NOTE: START_TAB_CAPTURE is intentionally NOT handled here.
+    // chrome.tabCapture API is only available in the Service Worker (background.js).
+    // background.js calls tabCapture.capture(), gets the stream ID, then sends
+    // START_CAPTURE (with streamId) to this offscreen document.
 
     case "START_CAPTURE":
       startCapture(message.streamId);

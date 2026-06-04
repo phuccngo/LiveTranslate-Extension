@@ -66,83 +66,57 @@ const AudioCaptureManager = (() => {
    *
    * Giải pháp: tabCapture.capture() gọi sync, xử lý stream trong callback.
    */
-  async function start() {
+  /**
+   * Dùng getMediaStreamId() thay vì capture() vì:
+   *  1. Không yêu cầu sync call trong message handler — hoạt động đúng khi
+   *     được gọi từ bên trong chrome.storage.local.get() callback.
+   *  2. Trả về stream ID (string) qua Promise — offscreen tự reconstruct
+   *     MediaStream bằng getUserMedia({ chromeMediaSourceId: streamId }).
+   *  3. Ổn định hơn trong MV3 Service Worker sau khi wake up từ sleep.
+   */
+  async function start(tabId) {
     if (_capturing) {
       console.warn("[AudioCapture] Already capturing.");
       return;
     }
-    if (!chrome?.tabCapture || typeof chrome.tabCapture.capture !== "function") {
-      const msg = "tabCapture API not available in this browser or context.";
-      console.warn("[AudioCapture] Delegating tabCapture to offscreen:", msg);
 
-      try {
-        // Ensure offscreen document exists, then ask it to start the tab capture.
-        await ensureOffscreen();
-        await chrome.runtime.sendMessage({ type: "START_TAB_CAPTURE" });
-      } catch (err) {
-        console.error("[AudioCapture] Failed to start tab capture via offscreen:", err?.message ?? err);
-        chrome.storage.local.get(["activeTabId"], ({ activeTabId }) => {
-          if (activeTabId) {
-            sendToContentScript(activeTabId, {
-              type:    "CAPTURE_ERROR",
-              payload: { message: err?.message ?? "Failed to start tab capture" },
-            });
-          }
-        });
-      }
-
+    if (!chrome?.tabCapture?.getMediaStreamId) {
+      const msg = "tabCapture.getMediaStreamId() không khả dụng. Kiểm tra manifest permissions.";
+      console.error("[AudioCapture]", msg);
+      if (tabId) sendToContentScript(tabId, { type: "CAPTURE_ERROR", payload: { message: msg } });
       return;
     }
 
-    console.log("[AudioCapture] Requesting tab audio stream...");
+    console.log("[AudioCapture] Requesting stream ID for tab:", tabId);
 
-    // SYNC CALL — không có await hay Promise trước dòng này
-    chrome.tabCapture.capture(
-      { audio: true, video: false },
-      async (stream) => {
-        if (chrome.runtime.lastError || !stream) {
-          const msg = chrome.runtime.lastError?.message ?? "No stream returned";
-          console.error("[AudioCapture] tabCapture.capture() failed:", msg);
+    try {
+      // getMediaStreamId() là async-safe — không cần sync call
+      const streamId = await chrome.tabCapture.getMediaStreamId({
+        targetTabId: tabId,
+      });
 
-          // Thông báo lỗi về content script để hiện trên overlay
-          chrome.storage.local.get(["activeTabId"], ({ activeTabId }) => {
-            if (activeTabId) {
-              sendToContentScript(activeTabId, {
-                type:    "CAPTURE_ERROR",
-                payload: { message: msg },
-              });
-            }
-          });
-          return;
-        }
+      console.log("[AudioCapture] Got streamId:", streamId?.slice(0, 20) + "…");
 
-        _capturing = true;
-        console.log("[AudioCapture] Stream obtained. Tracks:", stream.getTracks().length);
+      // Đảm bảo offscreen document đang chạy trước khi gửi streamId
+      await ensureOffscreen();
 
-        try {
-          // Đảm bảo offscreen document đang chạy
-          await ensureOffscreen();
+      // Gửi streamId sang offscreen để reconstruct MediaStream
+      await chrome.runtime.sendMessage({
+        type:     "START_CAPTURE",
+        streamId: streamId,
+      });
 
-          // Lấy stream ID để truyền sang offscreen
-          // (không thể truyền MediaStream object trực tiếp qua sendMessage)
-          const streamId = stream.id;
+      _capturing = true;
 
-          // Dừng stream ở background — offscreen sẽ tạo lại từ ID
-          // qua getUserMedia với chromeMediaSourceId
-          stream.getTracks().forEach((t) => t.stop());
-
-          // Kích hoạt capture trong offscreen
-          await chrome.runtime.sendMessage({
-            type:     "START_CAPTURE",
-            streamId: streamId,
-          });
-
-        } catch (err) {
-          console.error("[AudioCapture] Failed to start offscreen capture:", err);
-          _capturing = false;
-        }
+    } catch (err) {
+      console.error("[AudioCapture] start() failed:", err.message);
+      if (tabId) {
+        sendToContentScript(tabId, {
+          type:    "CAPTURE_ERROR",
+          payload: { message: err.message },
+        });
       }
-    );
+    }
   }
 
   // ── Dừng capture ───────────────────────────────────────────────────────
@@ -165,10 +139,7 @@ const AudioCaptureManager = (() => {
   // Đặt _capturing = false từ bên ngoài (khi offscreen báo lỗi)
   function markStopped() { _capturing = false; }
 
-  // Đặt _capturing = true từ bên ngoài (khi offscreen xác nhận đã bắt đầu)
-  function markStarted() { _capturing = true; }
-
-  return { start, stop, isCapturing, markStopped, markStarted };
+  return { start, stop, isCapturing, markStopped };
 })();
 
 
@@ -265,9 +236,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // (chỉ nếu extension đang active)
       chrome.storage.local.get(["isActive"], ({ isActive }) => {
         if (isActive && !AudioCaptureManager.isCapturing()) {
-          // AudioCaptureManager.start() gọi tabCapture.capture() sync
-          // Đây là safe point vì ta đang trong message listener (sync context)
-          AudioCaptureManager.start();
+          AudioCaptureManager.start(sender.tab?.id);
         }
       });
 
@@ -298,7 +267,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // ── Từ offscreen: capture đã bắt đầu ────────────────────────────────
     case "CAPTURE_STARTED": {
-      AudioCaptureManager.markStarted();
       console.log("[Background] ✅ Audio capture confirmed by offscreen.");
 
       // Thông báo content script để hiện trạng thái trên overlay
